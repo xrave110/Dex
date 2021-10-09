@@ -1,0 +1,220 @@
+pragma solidity ^0.8.0;
+pragma experimental ABIEncoderV2;
+
+import "./Wallet.sol";
+
+contract Dex is Wallet {
+    using SafeMath for uint256;
+
+    enum Side{
+        BUY_ORDER,
+        SELL_ORDER
+    }
+
+    struct Order {
+        uint id;
+        address trader;
+        Side side;
+        bytes32 ticker;
+        uint amount;
+        uint price;
+        uint filled;
+    }
+
+    uint public nextOrderId = 0;
+
+    mapping(bytes32 => mapping(uint => Order[])) orderBook;
+
+    function getOrderBook(bytes32 ticker, Side side) view public returns(Order[] memory){
+        return orderBook[ticker][uint(side)];
+    }    
+    
+    function createLimitOrder(Side side, bytes32 ticker, uint tokenAmount, uint price) public {
+        Order[] storage orders = orderBook[ticker][uint(side)];
+        if(side == Side.BUY_ORDER){
+            require(tokenAmount * price <= balances[msg.sender]["ETH"], "You do not have enough ETH to create an order");  
+        }
+        else if(side == Side.SELL_ORDER) {
+            require(tokenAmount <= balances[msg.sender][ticker], "You do not have enough tokens to create an order");
+        }
+        //Bubble sort
+        orders.push(Order(nextOrderId, msg.sender, side, ticker, tokenAmount, price, 0)); 
+        //_sortOrderBook(ticker, side);
+        _sortOrderBookIvans(ticker, side);
+        nextOrderId++;
+    }
+
+    function createMarketOrder(Side side, bytes32 ticker, uint tokenAmount) public {
+        uint orderBookSide; 
+        uint totalFilled;
+        uint cost;
+
+        if(side == Side.BUY_ORDER){
+            orderBookSide = 1; //SELL
+        }
+        else{
+            require(balances[msg.sender][ticker] <= tokenAmount, "You do not have enough tokens to trade");
+            orderBookSide = 0; //BUY
+        }
+        Order[] storage orders = orderBook[ticker][orderBookSide];
+        
+        require(orders.length > 0, "There is not enough liquidity");
+        for(uint i = 0; (i < orders.length) && (totalFilled < tokenAmount); i++){
+            uint leftToFill = (tokenAmount.sub(totalFilled));
+            uint availableToFill = orders[i].amount.sub(orders[i].filled);
+            if(availableToFill > leftToFill){
+                orders[i].filled = orders[i].filled.add(leftToFill);
+            }
+            else{ // availableToFill <= leftToFill
+                orders[i].filled = orders[i].filled.add(availableToFill);
+            }
+            totalFilled = totalFilled.add(orders[i].filled);
+            cost = cost.add(orders[i].filled.mul(orders[i].price));
+            if(Side.BUY_ORDER == side){
+                require(balances[msg.sender]["ETH"] >= (tokenAmount.mul(orders[i].price)), "You do not have enough ETH for this trade");                  
+                //sender actions
+                balances[msg.sender][ticker].add(totalFilled);
+                balances[msg.sender]["ETH"].sub(cost);
+                //trader actions
+                balances[orders[i].trader][ticker].sub(totalFilled);
+                balances[orders[i].trader]["ETH"].add(cost);
+            }
+            else{
+                //sender actions
+                balances[msg.sender][ticker].sub(totalFilled);
+                balances[msg.sender]["ETH"].add(cost);
+                //trader actions
+                balances[orders[i].trader][ticker].add(totalFilled);
+                balances[orders[i].trader]["ETH"].sub(cost);
+            }
+            while(orders.length > 0 && orders[0].filled < orders[0].amount){
+                for(uint idx = 0; idx > orders.length - 1; idx++){
+                    orders[idx] = orders[idx+1];
+                }
+                orders.pop();
+            }
+        }
+    }
+
+    /*function createMarketOrderMy(Side side, bytes32 ticker, uint tokenAmount) public {
+        uint orderBookSide; 
+        uint totalFilled;
+
+        if(side == Side.BUY_ORDER){
+            orderBookSide = 1; //SELL
+        }
+        else{
+            require(balances[msg.sender][ticker] <= tokenAmount, "You do not have enough tokens to trade");
+            orderBookSide = 0; //BUY
+        }
+        Order[] storage orders = orderBook[ticker][orderBookSide];
+        uint tokenRemains = (tokenAmount.sub(totalFilled));
+        require(orders.length > 0, "There is not enough liquidity");
+        for(uint i = 0; (i < orders.length) && (totalFilled < tokenAmount); i++){
+            if(orders[i].amount > tokenRemains){
+                if(side == Side.BUY_ORDER){
+                    require(balances[msg.sender]["ETH"] >= (tokenAmount.mul(orders[i].price)), "You do not have enough ETH for this trade");                  
+                    //sender actions
+                    balances[msg.sender][ticker].add(tokenAmount.sub(totalFilled));
+                    balances[msg.sender]["ETH"].sub((tokenAmount.mul(orders[i].price)));
+                    //trader actions
+                    balances[orders[i].trader][ticker].sub(tokenAmount.sub(totalFilled));
+                    balances[orders[i].trader]["ETH"].add(tokenAmount.mul(orders[i].price));
+                }
+                else if(side == Side.SELL_ORDER){
+                    //sender actions
+                    balances[msg.sender][ticker].sub(tokenAmount.sub(totalFilled));
+                    balances[msg.sender]["ETH"].add(tokenAmount.mul(orders[i].price));
+                    //trader actions
+                    balances[orders[i].trader][ticker].add(tokenAmount.sub(totalFilled));
+                    balances[orders[i].trader]["ETH"].sub((tokenAmount.mul(orders[i].price)));
+                }
+                orders[i].amount = orders[i].amount.sub(tokenAmount.sub(totalFilled));
+                totalFilled = tokenAmount;
+            }
+            else if((orders[i].filled == 0) && (orders[i].amount <= tokenRemains)){
+                if(side == Side.BUY_ORDER && orders[i].side == Side.SELL_ORDER){
+                    require(balances[msg.sender]["ETH"] >= (tokenAmount.mul(orders[i].price)), "You do not have enough ETH for this trade");
+                    //sender actions
+                    balances[msg.sender][ticker].add(tokenAmount.sub(totalFilled));
+                    balances[msg.sender]["ETH"].sub((tokenAmount.mul(orders[i].price)));
+                    //trader actions
+                    balances[orders[i].trader][ticker].sub(tokenAmount.sub(totalFilled));
+                    balances[orders[i].trader]["ETH"].add(tokenAmount.mul(orders[i].price));
+                }
+                else if(side == Side.SELL_ORDER && orders[i].side == Side.BUY_ORDER){
+                    //sender actions
+                    balances[msg.sender][ticker].sub(tokenAmount.sub(totalFilled));
+                    balances[msg.sender]["ETH"].add(tokenAmount.mul(orders[i].price));
+                    //trader actions
+                    balances[orders[i].trader][ticker].add(tokenAmount.sub(totalFilled));
+                    balances[orders[i].trader]["ETH"].sub((tokenAmount.mul(orders[i].price)));
+                }
+                orders[i].filled = 1;
+                totalFilled = totalFilled.add(orders[i].amount);
+                orders.pop();
+            }
+        }
+    }*/
+
+    function getEthDexBalance() view public returns(uint){
+        return balances[msg.sender]["ETH"];
+    }
+
+    function _sortOrderBook(bytes32 ticker, Side side) private {
+        Order[] storage orders = orderBook[ticker][uint(side)];
+        Order memory tmpOrder;
+        if(side == Side.BUY_ORDER){
+            for(uint i=0; i<orders.length; i++){
+                for(uint j=i+1; j<orders.length; j++){
+                    if(orders[i].price < orders[j].price){
+                        tmpOrder = orders[i];
+                        orders[i] = orders[j];
+                        orders[j] = tmpOrder;
+                    }
+                }
+            }
+        }
+        else if(side == Side.SELL_ORDER)
+        {
+            for(uint i=0; i<orders.length; i++){
+                for(uint j=i+1; j<orders.length; j++){
+                    if(orders[i].price < orders[j].price){
+                        tmpOrder = orders[i];
+                        orders[i] = orders[j];
+                        orders[j] = tmpOrder;
+                    }
+                }
+            }
+        }
+    }
+    function _sortOrderBookIvans(bytes32 ticker, Side side) private {
+        Order[] storage orders = orderBook[ticker][uint(side)];
+        Order memory tmpOrder;
+        uint i = orders.length > 0 ? orders.length - 1 : 0;
+
+        if(side == Side.BUY_ORDER){
+            while(i > 0){
+                if(orders[i-1].price > orders[i].price){
+                    break;
+                }
+                tmpOrder = orders[i-1];
+                orders[i-1] = orders[i];
+                orders[i] = tmpOrder;
+                i--;
+            }
+        }
+        else if(side == Side.SELL_ORDER){
+            while(i > 0){
+                if(orders[i-1].price < orders[i].price){
+                    break;
+                }
+                tmpOrder = orders[i-1];
+                orders[i-1] = orders[i];
+                orders[i] = tmpOrder;
+                i--;
+            }
+        }
+        
+    }
+}
